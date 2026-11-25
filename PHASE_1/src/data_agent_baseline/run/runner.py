@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import multiprocessing
+from queue import Empty
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -140,8 +141,17 @@ def _run_single_task_with_timeout(*, task_id: str, config: AppConfig) -> dict[st
         args=(task_id, config, queue),
     )
     process.start()
-    process.join(timeout_seconds)
+    deadline = perf_counter() + timeout_seconds
+    result = None
+    while perf_counter() < deadline:
+        try:
+            result = queue.get(timeout=min(0.2, max(0.0, deadline - perf_counter())))
+            break
+        except Empty:
+            if not process.is_alive():
+                break
 
+    process.join(timeout=max(0.0, deadline - perf_counter()))
     if process.is_alive():
         process.terminate()
         process.join(timeout=1.0)
@@ -150,7 +160,7 @@ def _run_single_task_with_timeout(*, task_id: str, config: AppConfig) -> dict[st
             process.join()
         return _failure_run_result_payload(task_id, f"Task timed out after {timeout_seconds} seconds.")
 
-    if queue.empty():
+    if result is None:
         exit_code = process.exitcode
         if exit_code not in (None, 0):
             return _failure_run_result_payload(
@@ -159,7 +169,6 @@ def _run_single_task_with_timeout(*, task_id: str, config: AppConfig) -> dict[st
             )
         return _failure_run_result_payload(task_id, "Task exited without returning a result.")
 
-    result = queue.get()
     if result.get("ok"):
         return dict(result["run_result"])
     return _failure_run_result_payload(task_id, f"Task failed with uncaught error: {result['error']}")
